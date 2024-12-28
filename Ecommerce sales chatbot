@@ -1,0 +1,226 @@
+# requirements.txt
+"""
+flask==2.0.1
+flask-sqlalchemy==2.5.1
+flask-login==0.5.0
+flask-cors==3.0.10
+python-dotenv==0.19.0
+bcrypt==3.2.0
+pytest==6.2.5
+"""
+
+# config.py
+from datetime import timedelta
+import os
+
+class Config:
+    SECRET_KEY = 'your-secret-key-here'  # In production, use environment variable
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///ecommerce.db'
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    JWT_SECRET_KEY = 'jwt-secret-key'  # In production, use environment variable
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
+
+# models.py
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+import bcrypt
+
+db = SQLAlchemy()
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(120), nullable=False)
+    conversations = db.relationship('Conversation', backref='user', lazy=True)
+
+    def set_password(self, password):
+        self.password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+
+    def check_password(self, password):
+        return bcrypt.checkpw(password.encode('utf-8'), self.password)
+
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    stock = db.Column(db.Integer, nullable=False)
+
+class Conversation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    messages = db.relationship('Message', backref='conversation', lazy=True)
+
+class Message(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('conversation.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    is_bot = db.Column(db.Boolean, default=False)
+
+# chatbot.py
+class ChatBot:
+    def __init__(self):
+        self.commands = {
+            'search': self.search_products,
+            'category': self.list_category,
+            'details': self.get_product_details,
+            'help': self.get_help
+        }
+
+    def process_message(self, message):
+        try:
+            command = message.split()[0].lower()
+            if command in self.commands:
+                return self.commands[command](message)
+            return self.get_help()
+        except Exception as e:
+            return f"Sorry, I couldn't process that request. Error: {str(e)}"
+
+    def search_products(self, message):
+        query = ' '.join(message.split()[1:])
+        products = Product.query.filter(
+            Product.name.ilike(f'%{query}%') | 
+            Product.description.ilike(f'%{query}%')
+        ).all()
+        if not products:
+            return "No products found matching your search."
+        return '\n'.join([f"- {p.name}: ${p.price}" for p in products])
+
+    def list_category(self, message):
+        category = ' '.join(message.split()[1:])
+        products = Product.query.filter_by(category=category).all()
+        if not products:
+            return f"No products found in category: {category}"
+        return '\n'.join([f"- {p.name}: ${p.price}" for p in products])
+
+    def get_product_details(self, message):
+        try:
+            product_id = int(message.split()[1])
+            product = Product.query.get(product_id)
+            if not product:
+                return "Product not found."
+            return f"""
+Product: {product.name}
+Price: ${product.price}
+Category: {product.category}
+Stock: {product.stock}
+Description: {product.description}
+"""
+        except (IndexError, ValueError):
+            return "Please provide a valid product ID."
+
+    def get_help(self):
+        return """
+Available commands:
+- search <query>: Search for products
+- category <name>: List products in a category
+- details <id>: Get detailed information about a product
+- help: Show this help message
+"""
+
+# app.py
+from flask import Flask, request, jsonify
+from flask_login import LoginManager, login_user, logout_user, login_required
+from flask_cors import CORS
+import json
+
+app = Flask(__name__)
+app.config.from_object(Config)
+CORS(app)
+db.init_app(app)
+login_manager = LoginManager()
+login_manager.init_app(app)
+chatbot = ChatBot()
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'error': 'Username already exists'}), 400
+    
+    user = User(username=data['username'])
+    user.set_password(data['password'])
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({'message': 'User registered successfully'}), 201
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(username=data['username']).first()
+    if user and user.check_password(data['password']):
+        login_user(user)
+        return jsonify({'message': 'Logged in successfully'})
+    return jsonify({'error': 'Invalid credentials'}), 401
+
+@app.route('/api/chat', methods=['POST'])
+@login_required
+def chat():
+    data = request.get_json()
+    user_id = current_user.id
+    message_content = data['message']
+
+    # Get or create conversation
+    conversation = Conversation.query.filter_by(user_id=user_id).order_by(Conversation.timestamp.desc()).first()
+    if not conversation:
+        conversation = Conversation(user_id=user_id)
+        db.session.add(conversation)
+
+    # Save user message
+    user_message = Message(
+        conversation_id=conversation.id,
+        content=message_content,
+        is_bot=False
+    )
+    db.session.add(user_message)
+
+    # Process message and get bot response
+    bot_response = chatbot.process_message(message_content)
+
+    # Save bot response
+    bot_message = Message(
+        conversation_id=conversation.id,
+        content=bot_response,
+        is_bot=True
+    )
+    db.session.add(bot_message)
+    db.session.commit()
+
+    return jsonify({
+        'response': bot_response,
+        'timestamp': bot_message.timestamp.isoformat()
+    })
+
+# utils/populate_db.py
+def populate_mock_data():
+    # Sample categories
+    categories = ['Electronics', 'Clothing', 'Books', 'Home & Garden', 'Sports']
+    
+    # Sample products for each category
+    products = []
+    for i in range(100):
+        category = categories[i % len(categories)]
+        product = Product(
+            name=f"Product {i+1}",
+            description=f"This is a detailed description for product {i+1}",
+            price=round(random.uniform(10.0, 1000.0), 2),
+            category=category,
+            stock=random.randint(0, 100)
+        )
+        products.append(product)
+    
+    db.session.add_all(products)
+    db.session.commit()
+
+if __name__ == '__main__':
+    # Create database and populate with mock data
+    with app.app_context():
+        db.create_all()
+        populate_mock_data()
